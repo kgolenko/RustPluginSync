@@ -1,7 +1,6 @@
 import argparse
 import json
 import logging
-import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +15,17 @@ EXIT_JSON = 3
 EXIT_COPY = 4
 
 DEFAULT_CONFIG_PATH = r"C:\deploy\rust-sync.json"
+DEFAULT_SAMPLE_CONFIG = {
+    "RepoPath": r"C:\deploy\rust-plugins-config",
+    "ServerRoot": r"C:\Users\Administrator\Desktop\266Server",
+    "PluginsTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\plugins",
+    "ConfigTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\config",
+    "LogPath": r"C:\deploy\logs\deploy.log",
+    "IntervalSeconds": 120,
+    "Branch": "main",
+    "GitRetryCount": 3,
+    "GitRetryDelaySeconds": 10,
+}
 
 
 @dataclass
@@ -36,6 +46,12 @@ def _load_config(path: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"Config not found: {path}")
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _write_sample_config(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(DEFAULT_SAMPLE_CONFIG, f, ensure_ascii=False, indent=2)
 
 
 def _settings_from_config(cfg: dict[str, Any]) -> Settings:
@@ -91,7 +107,13 @@ def _git_fetch_with_retries(settings: Settings) -> bool:
         code, _, err = _run_git(["fetch"], settings.repo_path)
         if code == 0:
             return True
-        logging.error("ERROR code=%s git fetch failed (attempt %s/%s): %s", EXIT_GIT, attempt, settings.git_retry_count, err)
+        logging.error(
+            "ERROR code=%s git fetch failed (attempt %s/%s): %s",
+            EXIT_GIT,
+            attempt,
+            settings.git_retry_count,
+            err,
+        )
         time.sleep(settings.git_retry_delay_seconds)
     return False
 
@@ -107,7 +129,9 @@ def _git_rev_parse(settings: Settings, ref: str) -> str | None:
 def _git_reset_hard(settings: Settings, ref: str) -> bool:
     code, _, err = _run_git(["reset", "--hard", ref], settings.repo_path)
     if code != 0:
-        logging.error("ERROR code=%s git reset --hard %s failed: %s", EXIT_GIT, ref, err)
+        logging.error(
+            "ERROR code=%s git reset --hard %s failed: %s", EXIT_GIT, ref, err
+        )
         return False
     return True
 
@@ -130,7 +154,13 @@ def _copy_files(src_dir: Path, pattern: str, dest_dir: Path) -> bool:
                 shutil.copy2(file, dest_dir / file.name)
         return True
     except Exception as exc:
-        logging.error("ERROR code=%s copy failed from %s to %s: %s", EXIT_COPY, src_dir, dest_dir, exc)
+        logging.error(
+            "ERROR code=%s copy failed from %s to %s: %s",
+            EXIT_COPY,
+            src_dir,
+            dest_dir,
+            exc,
+        )
         return False
 
 
@@ -176,10 +206,14 @@ def run(settings: Settings) -> None:
             time.sleep(settings.interval_seconds)
             continue
 
-        if not _copy_files(settings.repo_path / "plugins", "*.cs", settings.plugins_target):
+        if not _copy_files(
+            settings.repo_path / "plugins", "*.cs", settings.plugins_target
+        ):
             time.sleep(settings.interval_seconds)
             continue
-        if not _copy_files(settings.repo_path / "config", "*.json", settings.config_target):
+        if not _copy_files(
+            settings.repo_path / "config", "*.json", settings.config_target
+        ):
             time.sleep(settings.interval_seconds)
             continue
 
@@ -189,12 +223,20 @@ def run(settings: Settings) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rust plugins/config sync service")
-    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to config JSON")
+    parser.add_argument(
+        "--config", default=DEFAULT_CONFIG_PATH, help="Path to config JSON"
+    )
     args = parser.parse_args()
 
     try:
-        cfg = _load_config(Path(args.config))
+        config_path = Path(args.config)
+        cfg = _load_config(config_path)
         settings = _settings_from_config(cfg)
+    except FileNotFoundError:
+        _write_sample_config(Path(args.config))
+        print(f"ERROR code={EXIT_ENV} config created at: {args.config}")
+        print("Please edit the config and restart the service.")
+        sys.exit(EXIT_ENV)
     except Exception as exc:
         print(f"ERROR code={EXIT_ENV} config load failed: {exc}")
         sys.exit(EXIT_ENV)

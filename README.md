@@ -7,6 +7,23 @@
 - Git for Windows
 - Python 3.10+ (Poetry)
 
+## Установка Python и Poetry
+1. Установи Python 3.10+ с официального сайта (важно включить опцию **Add Python to PATH**).
+2. Проверь установку Python:
+   ```powershell
+   python --version
+   ```
+3. Установи Poetry через pipx (рекомендуется):
+   ```powershell
+   python -m pip install --user pipx
+   python -m pipx ensurepath
+   pipx install poetry
+   ```
+4. Проверь Poetry:
+   ```powershell
+   poetry --version
+   ```
+
 ## Подготовка перед стартом
 1. Убедись, что установлен Git for Windows и `git` доступен в `PATH`.
 2. Установи Poetry (любой удобный способ) и проверь:
@@ -17,6 +34,20 @@
    ```bash
    poetry install
    ```
+
+## Быстрый старт (минимум ручной работы)
+Запусти мастер‑скрипт на сервере:
+
+```bat
+scripts\\bootstrap.bat
+```
+
+Скрипт:
+- создаст SSH ключ и пропишет его в `~\\.ssh\\config`
+- покажет публичный ключ для GitHub Deploy Keys
+- попросит путь к Rust серверу
+- попросит SSH URL репозитория с плагинами и клонирует его
+- создаст `C:\\deploy\\rust-sync.json`
 
 ## Настройка SSH (Deploy Key)
 Запусти скрипт на сервере:
@@ -48,7 +79,9 @@ git clone git@github.com:USER/REPO.git C:\deploy\rust-plugins-config
 ```
 
 ## Конфиг
-Создай `C:\deploy\rust-sync.json`:
+Если файла нет, при первом запуске сервис создаст `C:\deploy\rust-sync.json` и завершится. Отредактируй его и запусти снова.
+
+Пример `C:\deploy\rust-sync.json`:
 
 ```json
 {
@@ -72,6 +105,12 @@ poetry install
 ```
 
 ## Запуск
+Запуск через BAT-скрипт:
+```bat
+scripts\run-service.bat
+```
+
+Или вручную:
 ```bash
 poetry run rust-sync --config C:\deploy\rust-sync.json
 ```

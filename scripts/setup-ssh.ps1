@@ -19,17 +19,17 @@ function Ensure-ParentDir($path) {
     Ensure-Dir $parent
 }
 
-function Ensure-SshConfigEntry($configPath, $host, $keyPath, $user) {
+function Ensure-SshConfigEntry($configPath, $hostName, $keyPath, $user) {
     Ensure-ParentDir $configPath
     if (-not (Test-Path -LiteralPath $configPath)) {
         New-Item -ItemType File -Path $configPath | Out-Null
     }
 
     $configText = Get-Content -LiteralPath $configPath -Raw
-    $hostEntry = "Host $host"
+    $hostEntry = "Host $hostName"
     if ($configText -notmatch [regex]::Escape($hostEntry)) {
-        Add-Content -LiteralPath $configPath -Value "`nHost $host"
-        Add-Content -LiteralPath $configPath -Value "  HostName $host"
+        Add-Content -LiteralPath $configPath -Value "`nHost $hostName"
+        Add-Content -LiteralPath $configPath -Value "  HostName $hostName"
         Add-Content -LiteralPath $configPath -Value "  User $user"
         Add-Content -LiteralPath $configPath -Value "  IdentityFile $keyPath"
         Add-Content -LiteralPath $configPath -Value "  IdentitiesOnly yes"
