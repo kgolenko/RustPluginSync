@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "rust-plugin-sync"
+version = "0.1.0"
+description = "Console service for syncing Rust Oxide plugins/configs from GitHub"
+authors = ["kgolenko"]
+readme = "README.md"
+packages = [{ include = "rust_sync", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+
+[tool.poetry.scripts]
+rust-sync = "rust_sync.__main__:main"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
