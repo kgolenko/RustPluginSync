@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,10 @@ GIT_TIMEOUT_SECONDS = 30
 STARTUP_DELAY_SECONDS = 1
 
 DEFAULT_CONFIG_PATH = r"C:\deploy\rust-sync.json"
+DEFAULT_PLUGINS_REPO_DIR = r"C:\deploy\rust-plugins-config"
+DEFAULT_KEY_DIR = r"C:\deploy\keys"
+DEFAULT_KEY_NAME = "rust-sync"
+DEFAULT_INSTALL_DIR = r"C:\deploy"
 DEFAULT_SAMPLE_CONFIG = {
     "LogPath": r"C:\deploy\logs\deploy.log",
     "IntervalSeconds": 120,
@@ -32,7 +37,7 @@ DEFAULT_SAMPLE_CONFIG = {
     "Servers": [
         {
             "Name": "main",
-            "RepoPath": r"C:\deploy\rust-plugins-config",
+            "RepoPath": DEFAULT_PLUGINS_REPO_DIR,
             "ServerRoot": r"C:\Users\Administrator\Desktop\266Server",
             "PluginsTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\plugins",
             "ConfigTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\config",
@@ -86,6 +91,19 @@ def _write_sample_config(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(DEFAULT_SAMPLE_CONFIG, f, ensure_ascii=False, indent=2)
+
+
+def _write_bootstrap_config(
+    path: Path, server_root: Path, plugins_repo_dir: Path
+) -> None:
+    config = deepcopy(DEFAULT_SAMPLE_CONFIG)
+    config["Servers"][0]["RepoPath"] = str(plugins_repo_dir)
+    config["Servers"][0]["ServerRoot"] = str(server_root)
+    config["Servers"][0]["PluginsTarget"] = str(server_root / "oxide" / "plugins")
+    config["Servers"][0]["ConfigTarget"] = str(server_root / "oxide" / "config")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
 
 
 def _settings_from_config(cfg: dict[str, Any]) -> Settings:
@@ -235,6 +253,190 @@ def _run_git(args: list[str], cwd: Path, timeout_seconds: int) -> tuple[int, str
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout_seconds}s"
+
+
+def _run_cmd(args: list[str]) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True)
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except Exception as exc:
+        return 1, "", str(exc)
+
+
+def _ensure_ssh_config_entry(config_path: Path, key_path: Path) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = "\n".join(
+        [
+            "Host github.com",
+            "  HostName github.com",
+            "  User git",
+            f"  IdentityFile {key_path}",
+            "  IdentitiesOnly yes",
+            "",
+        ]
+    )
+    config_path.write_text(entry, encoding="ascii")
+
+
+def _ensure_ssh_key(key_dir: Path, key_name: str) -> tuple[Path, Path]:
+    key_dir.mkdir(parents=True, exist_ok=True)
+    private_key_path = key_dir / key_name
+    public_key_path = Path(f"{private_key_path}.pub")
+
+    if not private_key_path.exists():
+        code, _, err = _run_cmd(
+            [
+                "ssh-keygen",
+                "-t",
+                "ed25519",
+                "-C",
+                "rust-sync",
+                "-f",
+                str(private_key_path),
+                "-N",
+                "",
+                "-q",
+            ]
+        )
+        if code != 0:
+            raise RuntimeError(f"ssh-keygen failed: {err}")
+    else:
+        code, _, _ = _run_cmd(
+            ["ssh-keygen", "-y", "-P", "", "-f", str(private_key_path)]
+        )
+        if code != 0:
+            print(
+                "Existing SSH key is passphrase-protected and will block "
+                "non-interactive checks."
+            )
+            regen = input("Regenerate key without passphrase? (y/n): ").strip().lower()
+            if regen == "y":
+                try:
+                    private_key_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    public_key_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                code, _, err = _run_cmd(
+                    [
+                        "ssh-keygen",
+                        "-t",
+                        "ed25519",
+                        "-C",
+                        "rust-sync",
+                        "-f",
+                        str(private_key_path),
+                        "-N",
+                        "",
+                        "-q",
+                    ]
+                )
+                if code != 0:
+                    raise RuntimeError(f"ssh-keygen failed: {err}")
+
+    return private_key_path, public_key_path
+
+
+def _check_ssh_access(private_key_path: Path) -> tuple[bool, str]:
+    result = subprocess.run(
+        [
+            "ssh",
+            "-i",
+            str(private_key_path),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-T",
+            "git@github.com",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    text = output.lower()
+    ok = "successfully authenticated" in text or "hi " in text
+    return ok, output.strip()
+
+
+def _bootstrap_interactive(
+    config_path: Path,
+    plugins_repo_dir: Path,
+    key_dir: Path,
+    key_name: str,
+    install_dir: Path,
+) -> None:
+    print("== Rust Plugin Sync bootstrap ==")
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    if shutil.which("git") is None:
+        print(f"ERROR code={EXIT_ENV} git not found in PATH")
+        sys.exit(EXIT_ENV)
+    if shutil.which("ssh") is None or shutil.which("ssh-keygen") is None:
+        print(f"ERROR code={EXIT_ENV} ssh/ssh-keygen not found in PATH")
+        sys.exit(EXIT_ENV)
+
+    private_key_path, public_key_path = _ensure_ssh_key(key_dir, key_name)
+    ssh_config_path = Path.home() / ".ssh" / "config"
+    _ensure_ssh_config_entry(ssh_config_path, private_key_path)
+
+    print(f"SSH config path: {ssh_config_path}")
+    print("SSH config contents:")
+    print(ssh_config_path.read_text(encoding="utf-8", errors="replace"))
+    print(f"Private key exists: {private_key_path.exists()}")
+    print(f"Public key exists:  {public_key_path.exists()}")
+    print("")
+    print("Public key (add to GitHub Deploy Keys, read-only):")
+    print(public_key_path.read_text(encoding="utf-8", errors="replace").strip())
+
+    input("Press Enter after you added the key to GitHub: ")
+
+    while True:
+        print("Checking SSH access to GitHub...")
+        ok, output = _check_ssh_access(private_key_path)
+        if output:
+            print("SSH output:")
+            print(output)
+        else:
+            print("SSH output:")
+            print("(empty output)")
+        if ok:
+            break
+        print("SSH check failed. Verify Deploy Key and access.")
+        retry = input("Retry SSH check? (y/n): ").strip().lower()
+        if retry != "y":
+            cont = input("Continue anyway (skip SSH check)? (y/n): ").strip().lower()
+            if cont != "y":
+                sys.exit(EXIT_ENV)
+            break
+
+    server_root_input = input(
+        r"Enter Rust server path (e.g. C:\Users\Administrator\Desktop\266Server): "
+    ).strip()
+    if not server_root_input:
+        print("ERROR: ServerRoot is required")
+        sys.exit(EXIT_ENV)
+    server_root = Path(server_root_input)
+
+    repo_url = input(
+        "Enter plugins repo SSH URL (e.g. git@github.com:USER/REPO.git): "
+    ).strip()
+    if not repo_url:
+        print("ERROR: Repo URL is required")
+        sys.exit(EXIT_ENV)
+
+    if not plugins_repo_dir.exists():
+        code, _, err = _run_cmd(["git", "clone", repo_url, str(plugins_repo_dir)])
+        if code != 0:
+            print(f"ERROR code={EXIT_GIT} git clone failed: {err}")
+            sys.exit(EXIT_GIT)
+
+    _write_bootstrap_config(config_path, server_root, plugins_repo_dir)
+    print(f"Config created: {config_path}")
 
 
 def _git_fetch_with_retries(settings: Settings, server: ServerConfig) -> bool:
@@ -507,14 +709,47 @@ def main() -> None:
         "--config", default=DEFAULT_CONFIG_PATH, help="Path to config JSON"
     )
     parser.add_argument(
+        "--plugins-repo-dir",
+        default=DEFAULT_PLUGINS_REPO_DIR,
+        help="Path to plugins repo clone",
+    )
+    parser.add_argument(
+        "--key-dir",
+        default=DEFAULT_KEY_DIR,
+        help="Path to SSH keys directory",
+    )
+    parser.add_argument(
+        "--key-name",
+        default=DEFAULT_KEY_NAME,
+        help="SSH key base filename",
+    )
+    parser.add_argument(
+        "--install-dir",
+        default=DEFAULT_INSTALL_DIR,
+        help="Base install directory",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Do not modify files, only log planned actions",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Run interactive bootstrap before starting",
     )
     args = parser.parse_args()
 
     try:
         config_path = Path(args.config)
+        if args.bootstrap or not config_path.exists():
+            _bootstrap_interactive(
+                config_path=config_path,
+                plugins_repo_dir=Path(args.plugins_repo_dir),
+                key_dir=Path(args.key_dir),
+                key_name=args.key_name,
+                install_dir=Path(args.install_dir),
+            )
         cfg = _load_config(config_path)
         settings = _settings_from_config(cfg)
     except FileNotFoundError:
