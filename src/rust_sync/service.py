@@ -38,9 +38,9 @@ DEFAULT_SAMPLE_CONFIG = {
         {
             "Name": "main",
             "RepoPath": DEFAULT_PLUGINS_REPO_DIR,
-            "ServerRoot": r"C:\Users\Administrator\Desktop\266Server",
-            "PluginsTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\plugins",
-            "ConfigTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\config",
+            "ServerRoot": r"C:\Users\Administrator\Desktop\server",
+            "PluginsTarget": r"C:\Users\Administrator\Desktop\server\oxide\plugins",
+            "ConfigTarget": r"C:\Users\Administrator\Desktop\server\oxide\config",
             "Branch": "main",
             "PluginsPattern": ["*.cs"],
             "ConfigPattern": ["*.json"],
@@ -415,7 +415,7 @@ def _bootstrap_interactive(
             break
 
     server_root_input = input(
-        r"Enter Rust server path (e.g. C:\Users\Administrator\Desktop\266Server): "
+        r"Enter Rust server path (e.g. C:\Users\Administrator\Desktop\server): "
     ).strip()
     if not server_root_input:
         print("ERROR: ServerRoot is required")

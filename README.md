@@ -81,9 +81,9 @@ git clone git@github.com:USER/REPO.git C:\deploy\rust-plugins-config
     {
       "Name": "main",
       "RepoPath": "C:\\deploy\\rust-plugins-config",
-      "ServerRoot": "C:\\Users\\Administrator\\Desktop\\266Server",
-      "PluginsTarget": "C:\\Users\\Administrator\\Desktop\\266Server\\oxide\\plugins",
-      "ConfigTarget": "C:\\Users\\Administrator\\Desktop\\266Server\\oxide\\config",
+      "ServerRoot": "C:\\Users\\Administrator\\Desktop\\server",
+      "PluginsTarget": "C:\\Users\\Administrator\\Desktop\\server\\oxide\\plugins",
+      "ConfigTarget": "C:\\Users\\Administrator\\Desktop\\server\\oxide\\config",
       "Branch": "main",
       "PluginsPattern": ["*.cs"],
       "ConfigPattern": ["*.json"],
