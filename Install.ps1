@@ -1,6 +1,7 @@
 param(
     [string]$PythonVersion = "3.12",
-    [switch]$InstallPoetry
+    [switch]$InstallPoetry,
+    [switch]$InstallDeps
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +36,11 @@ python -m pip install --upgrade pip
 if ($InstallPoetry) {
     Log "Installing poetry..."
     python -m pip install --upgrade poetry
+}
+
+if ($InstallDeps) {
+    Log "Installing project dependencies..."
+    python -m pip install -e .
 }
 
 Log "Done."

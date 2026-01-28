@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rust Plugin Sync</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg"></div>
+    <header class="top">
+      <div>
+        <div class="eyebrow">Rust Plugin Sync</div>
+        <h1>Панель управления</h1>
+        <div class="sub">статусы, логи, управление синхронизацией</div>
+      </div>
+      <div class="status-pill" id="globalStatus">UNKNOWN</div>
+    </header>
+
+    <section class="grid">
+      <div class="card">
+        <div class="card-title">Состояние</div>
+        <div id="statusCards" class="status-cards"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Управление</div>
+        <div class="actions">
+          <button id="btnPause">Pause</button>
+          <button id="btnResume">Resume</button>
+          <button id="btnRunOnce">Run once</button>
+          <label class="toggle">
+            <input id="toggleDry" type="checkbox" />
+            <span>Dry-run</span>
+          </label>
+        </div>
+        <div class="config-actions">
+          <button id="btnOpenConfig" class="secondary">Open config</button>
+          <button id="btnValidate" class="secondary">Validate config</button>
+          <span id="validateStatus" class="hint"></span>
+        </div>
+        <textarea id="configText" readonly></textarea>
+      </div>
+      <div class="card span-2">
+        <div class="card-title">Логи</div>
+        <div class="filters">
+          <select id="levelFilter">
+            <option value="">ALL</option>
+            <option value="INFO">INFO</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARNING">WARNING</option>
+          </select>
+          <select id="serverFilter">
+            <option value="">ALL SERVERS</option>
+          </select>
+          <button id="btnClear" class="secondary">Clear</button>
+        </div>
+        <pre id="logStream" class="log"></pre>
+      </div>
+      <div class="card span-2">
+        <div class="card-title">История деплоев</div>
+        <div id="history" class="history"></div>
+      </div>
+    </section>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

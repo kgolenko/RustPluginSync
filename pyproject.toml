@@ -5,9 +5,12 @@ description = "Console service for syncing Rust Oxide plugins/configs from GitHu
 authors = ["kgolenko"]
 readme = "README.md"
 packages = [{ include = "rust_sync", from = "src" }]
+include = ["src/rust_sync/web/static/*"]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
+fastapi = "^0.115.0"
+uvicorn = {version = "^0.30.0", extras = ["standard"]}
 
 [tool.poetry.scripts]
 rust-sync = "rust_sync.__main__:main"

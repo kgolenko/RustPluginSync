@@ -6,9 +6,11 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +80,101 @@ class Settings:
     startup_delay_seconds: int
     dry_run: bool
     servers: list[ServerConfig]
+
+
+@dataclass
+class DeploymentRecord:
+    server: str
+    commit: str
+    author: str
+    files: list[str]
+    duration_seconds: float
+    timestamp: str
+    status: str
+
+
+@dataclass
+class ServerStatus:
+    name: str
+    last_deploy_time: str | None = None
+    last_commit: str | None = None
+    last_error: str | None = None
+    last_duration_seconds: float | None = None
+    last_run_time: str | None = None
+    last_status: str = "UNKNOWN"
+
+
+class SyncState:
+    def __init__(self, server_names: list[str]) -> None:
+        self._lock = threading.Lock()
+        self._servers: dict[str, ServerStatus] = {
+            name: ServerStatus(name=name) for name in server_names
+        }
+        self._history: list[DeploymentRecord] = []
+        self._max_history = 200
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "servers": [self._servers[name].__dict__ for name in self._servers],
+                "history": [item.__dict__ for item in self._history],
+            }
+
+    def update_server_status(self, name: str, **kwargs: Any) -> None:
+        with self._lock:
+            server = self._servers.get(name)
+            if not server:
+                return
+            for key, value in kwargs.items():
+                if hasattr(server, key):
+                    setattr(server, key, value)
+
+    def add_history(self, record: DeploymentRecord) -> None:
+        with self._lock:
+            self._history.append(record)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history :]
+
+
+class SyncController:
+    def __init__(self) -> None:
+        self._paused = False
+        self._run_once = threading.Event()
+        self._lock = threading.Lock()
+        self._dry_run_override = False
+
+    def pause(self) -> None:
+        with self._lock:
+            self._paused = True
+
+    def resume(self) -> None:
+        with self._lock:
+            self._paused = False
+
+    def is_paused(self) -> bool:
+        with self._lock:
+            return self._paused
+
+    def request_run_once(self) -> None:
+        self._run_once.set()
+
+    def consume_run_once(self) -> bool:
+        if self._run_once.is_set():
+            self._run_once.clear()
+            return True
+        return False
+
+    def set_dry_run(self, value: bool) -> None:
+        with self._lock:
+            self._dry_run_override = value
+
+    def get_dry_run(self) -> bool:
+        with self._lock:
+            return self._dry_run_override
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -207,6 +304,14 @@ def _settings_from_config(cfg: dict[str, Any]) -> Settings:
         servers=servers,
         dry_run=dry_run,
     )
+
+
+def validate_config_dict(cfg: dict[str, Any]) -> list[str]:
+    try:
+        _settings_from_config(cfg)
+        return []
+    except Exception as exc:
+        return [str(exc)]
 
 
 def _ensure_paths(server: ServerConfig) -> bool:
@@ -543,6 +648,29 @@ def _validate_json_from_ref(settings: Settings, server: ServerConfig, ref: str) 
     return True
 
 
+def _git_commit_info(
+    settings: Settings, server: ServerConfig, ref: str
+) -> tuple[str, list[str]]:
+    code, out, err = _run_git(
+        ["show", "--name-only", "--pretty=format:%an", ref],
+        server.repo_path,
+        settings.git_timeout_seconds,
+    )
+    if code != 0:
+        logging.error(
+            "[%s] ERROR code=%s git show %s failed: %s",
+            server.name,
+            EXIT_GIT,
+            ref,
+            err,
+        )
+        return "unknown", []
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    author = lines[0] if lines else "unknown"
+    files = lines[1:] if len(lines) > 1 else []
+    return author, files
+
+
 def _sync_tree(
     server: ServerConfig,
     src_dir: Path,
@@ -628,79 +756,154 @@ def _setup_logging(log_path: Path) -> None:
     )
 
 
+def create_runtime(
+    settings: Settings,
+) -> tuple[SyncState, SyncController, "SyncRunner"]:
+    state = SyncState([srv.name for srv in settings.servers])
+    controller = SyncController()
+    runner = SyncRunner(settings=settings, state=state, controller=controller)
+    return state, controller, runner
+
+
 def run(settings: Settings) -> None:
+    state, controller, runner = create_runtime(settings)
     logging.info("START")
     time.sleep(settings.startup_delay_seconds)
-    while True:
-        for server in settings.servers:
-            if not server.enabled:
-                logging.info("[%s] Skipped (disabled)", server.name)
-                continue
-            if not _ensure_paths(server):
-                missing = []
-                if not server.repo_path.exists():
-                    missing.append(f"RepoPath={server.repo_path}")
-                if not (server.repo_path / ".git").exists():
-                    missing.append(f"RepoPath missing .git={server.repo_path}")
-                if not server.plugins_target.exists():
-                    missing.append(f"PluginsTarget={server.plugins_target}")
-                if not server.config_target.exists():
-                    missing.append(f"ConfigTarget={server.config_target}")
-                logging.error(
-                    "[%s] ERROR code=%s missing paths: %s",
-                    server.name,
-                    EXIT_ENV,
-                    "; ".join(missing),
+    runner.run_forever()
+
+
+def _run_cycle(
+    settings: Settings, state: SyncState, controller: SyncController
+) -> None:
+    for server in settings.servers:
+        if not server.enabled:
+            logging.info("[%s] Skipped (disabled)", server.name)
+            continue
+        state.update_server_status(server.name, last_run_time=_utc_now_iso())
+        if not _ensure_paths(server):
+            missing = []
+            if not server.repo_path.exists():
+                missing.append(f"RepoPath={server.repo_path}")
+            if not (server.repo_path / ".git").exists():
+                missing.append(f"RepoPath missing .git={server.repo_path}")
+            if not server.plugins_target.exists():
+                missing.append(f"PluginsTarget={server.plugins_target}")
+            if not server.config_target.exists():
+                missing.append(f"ConfigTarget={server.config_target}")
+            error_msg = "; ".join(missing)
+            logging.error(
+                "[%s] ERROR code=%s missing paths: %s",
+                server.name,
+                EXIT_ENV,
+                error_msg,
+            )
+            state.update_server_status(
+                server.name, last_error=error_msg, last_status="ERROR"
+            )
+            continue
+
+        branch = server.branch or settings.branch
+
+        if not _git_fetch_with_retries(settings, server):
+            state.update_server_status(server.name, last_status="ERROR")
+            continue
+
+        local = _git_rev_parse(settings, server, "HEAD")
+        remote = _git_rev_parse(settings, server, f"origin/{branch}")
+        if not local or not remote:
+            state.update_server_status(server.name, last_status="ERROR")
+            continue
+
+        deploy_needed = local != remote
+        if not deploy_needed:
+            logging.info("[%s] No commit diff, verifying hashes", server.name)
+
+        if not _validate_json_from_ref(settings, server, f"origin/{branch}"):
+            state.update_server_status(server.name, last_status="ERROR")
+            continue
+
+        if not _git_reset_hard(settings, server, remote):
+            state.update_server_status(server.name, last_status="ERROR")
+            continue
+
+        effective_dry_run = settings.dry_run or controller.get_dry_run()
+        start = time.time()
+
+        synced_plugins = _sync_tree(
+            server,
+            server.repo_path / "plugins",
+            server.plugins_target,
+            server.plugins_pattern,
+            server.exclude_patterns,
+            server.delete_extraneous,
+            effective_dry_run,
+        )
+        if not synced_plugins:
+            state.update_server_status(server.name, last_status="ERROR")
+            continue
+
+        synced_config = _sync_tree(
+            server,
+            server.repo_path / "config",
+            server.config_target,
+            server.config_pattern,
+            server.exclude_patterns,
+            server.delete_extraneous,
+            effective_dry_run,
+        )
+        if not synced_config:
+            state.update_server_status(server.name, last_status="ERROR")
+            continue
+
+        duration = time.time() - start
+        author, files = _git_commit_info(settings, server, remote)
+        state.update_server_status(
+            server.name,
+            last_commit=remote,
+            last_duration_seconds=duration,
+            last_error=None,
+            last_status="OK",
+        )
+        if deploy_needed:
+            state.update_server_status(server.name, last_deploy_time=_utc_now_iso())
+            state.add_history(
+                DeploymentRecord(
+                    server=server.name,
+                    commit=remote,
+                    author=author,
+                    files=files,
+                    duration_seconds=duration,
+                    timestamp=_utc_now_iso(),
+                    status="OK",
                 )
-                continue
-
-            branch = server.branch or settings.branch
-
-            if not _git_fetch_with_retries(settings, server):
-                continue
-
-            local = _git_rev_parse(settings, server, "HEAD")
-            remote = _git_rev_parse(settings, server, f"origin/{branch}")
-            if not local or not remote:
-                continue
-
-            deploy_needed = local != remote
-            if not deploy_needed:
-                logging.info("[%s] No commit diff, verifying hashes", server.name)
-
-            if not _validate_json_from_ref(settings, server, f"origin/{branch}"):
-                continue
-
-            if not _git_reset_hard(settings, server, remote):
-                continue
-
-            synced_plugins = _sync_tree(
-                server,
-                server.repo_path / "plugins",
-                server.plugins_target,
-                server.plugins_pattern,
-                server.exclude_patterns,
-                server.delete_extraneous,
-                settings.dry_run,
             )
-            if not synced_plugins:
-                continue
-
-            synced_config = _sync_tree(
-                server,
-                server.repo_path / "config",
-                server.config_target,
-                server.config_pattern,
-                server.exclude_patterns,
-                server.delete_extraneous,
-                settings.dry_run,
-            )
-            if not synced_config:
-                continue
-
             logging.info("[%s] Deployed commit %s", server.name, remote)
 
-        time.sleep(settings.interval_seconds)
+
+class SyncRunner:
+    def __init__(
+        self, settings: Settings, state: SyncState, controller: SyncController
+    ):
+        self.settings = settings
+        self.state = state
+        self.controller = controller
+
+    def run_forever(self) -> None:
+        while True:
+            if self.controller.consume_run_once():
+                _run_cycle(self.settings, self.state, self.controller)
+                if self.controller.is_paused():
+                    time.sleep(1)
+                else:
+                    time.sleep(self.settings.interval_seconds)
+                continue
+
+            if self.controller.is_paused():
+                time.sleep(1)
+                continue
+
+            _run_cycle(self.settings, self.state, self.controller)
+            time.sleep(self.settings.interval_seconds)
 
 
 def main() -> None:
@@ -737,6 +940,22 @@ def main() -> None:
         "--bootstrap",
         action="store_true",
         help="Run interactive bootstrap before starting",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Start web UI (runs sync loop in background)",
+    )
+    parser.add_argument(
+        "--web-host",
+        default="0.0.0.0",
+        help="Web UI host",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=8787,
+        help="Web UI port",
     )
     args = parser.parse_args()
 
@@ -775,6 +994,21 @@ def main() -> None:
         sys.exit(EXIT_ENV)
 
     _setup_logging(settings.log_path)
+    if args.web:
+        from rust_sync.webapp import run_web, start_runner_background
+
+        state, controller, runner = create_runtime(settings)
+        start_runner_background(runner, settings.startup_delay_seconds)
+        run_web(
+            settings=settings,
+            state=state,
+            controller=controller,
+            config_path=config_path,
+            host=args.web_host,
+            port=args.web_port,
+        )
+        return
+
     try:
         run(settings)
     except KeyboardInterrupt:
