@@ -28,25 +28,45 @@ if (-not (Command-Exists "python")) {
 }
 
 # Prefer Python launcher if available to avoid picking up unsupported versions.
-$pythonCmd = "python"
+$pythonCmd = @("python")
 if (Command-Exists "py") {
-    $pythonCmd = "py -$PythonVersion"
+    $pythonCmd = @("py", "-$PythonVersion")
+}
+
+function Invoke-Python {
+    param([Parameter(ValueFromRemainingArguments = $true)]$Args)
+    $baseArgs = @()
+    if ($pythonCmd.Length -gt 1) {
+        $baseArgs = $pythonCmd[1..($pythonCmd.Length - 1)]
+    }
+    & $pythonCmd[0] @baseArgs @Args
 }
 
 Log "Python version:"
-& $pythonCmd --version
+$verOutput = Invoke-Python --version 2>&1
+Write-Host $verOutput
+$verMatch = [regex]::Match($verOutput, "Python\s+(\d+)\.(\d+)")
+if ($verMatch.Success) {
+    $major = [int]$verMatch.Groups[1].Value
+    $minor = [int]$verMatch.Groups[2].Value
+    if ($major -ne 3 -or $minor -ge 13) {
+        Log "ERROR: Unsupported Python version detected ($major.$minor)."
+        Log "Install Python $PythonVersion and rerun: winget install --id Python.Python.$PythonVersion -e --source winget"
+        exit 1
+    }
+}
 
 Log "Upgrading pip..."
-& $pythonCmd -m pip install --upgrade pip
+Invoke-Python -m pip install --upgrade pip
 
 if ($InstallPoetry) {
     Log "Installing poetry..."
-    & $pythonCmd -m pip install --upgrade poetry
+    Invoke-Python -m pip install --upgrade poetry
 }
 
 if ($InstallDeps) {
     Log "Installing project dependencies..."
-    & $pythonCmd -m pip install -e .
+    Invoke-Python -m pip install -e .
 }
 
 Log "Done."
