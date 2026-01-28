@@ -22,25 +22,31 @@ if (-not (Command-Exists "python")) {
         Log "Python installed. You may need to reopen the terminal for PATH to update."
     } else {
         Log "ERROR: python not found and winget is not available."
-        Log "Install Python manually from python.org and rerun this script."
+        Log "Install Python $PythonVersion manually from python.org and rerun this script."
         exit 1
     }
 }
 
+# Prefer Python launcher if available to avoid picking up unsupported versions.
+$pythonCmd = "python"
+if (Command-Exists "py") {
+    $pythonCmd = "py -$PythonVersion"
+}
+
 Log "Python version:"
-python --version
+& $pythonCmd --version
 
 Log "Upgrading pip..."
-python -m pip install --upgrade pip
+& $pythonCmd -m pip install --upgrade pip
 
 if ($InstallPoetry) {
     Log "Installing poetry..."
-    python -m pip install --upgrade poetry
+    & $pythonCmd -m pip install --upgrade poetry
 }
 
 if ($InstallDeps) {
     Log "Installing project dependencies..."
-    python -m pip install -e .
+    & $pythonCmd -m pip install -e .
 }
 
 Log "Done."

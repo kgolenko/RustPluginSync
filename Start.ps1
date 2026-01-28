@@ -11,6 +11,11 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 $env:PYTHONPATH = "$PSScriptRoot\src"
 
+$pythonCmd = "python"
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    $pythonCmd = "py -3.12"
+}
+
 $argsList = @("--config", $ConfigPath)
 if ($Bootstrap) {
     $argsList += "--bootstrap"
@@ -19,4 +24,4 @@ if ($Web) {
     $argsList += @("--web", "--web-host", $WebHost, "--web-port", "$WebPort")
 }
 
-python -m rust_sync @argsList
+& $pythonCmd -m rust_sync @argsList
