@@ -35,31 +35,15 @@
    poetry install
    ```
 
-## Быстрый старт (минимум ручной работы)
-Запусти мастер‑скрипт на сервере:
+## Один стартовый скрипт (bootstrap + запуск)
+Запусти один скрипт — он сам проверит окружение и при необходимости выполнит bootstrap:
 
 ```bat
-scripts\\bootstrap.bat
+Start.bat
 ```
 
-Скрипт:
-- создаст SSH ключ и пропишет его в `~\\.ssh\\config`
-- покажет публичный ключ для GitHub Deploy Keys
-- попросит путь к Rust серверу
-- попросит SSH URL репозитория с плагинами и клонирует его
-- создаст `C:\\deploy\\rust-sync.json`
-
-## Настройка SSH (Deploy Key)
-Запусти скрипт на сервере:
-
-```bat
-scripts\setup-ssh.bat
-```
-
-Он:
-- создаст `C:\deploy\keys\rust-sync` (ed25519)
-- добавит запись `github.com` в `%USERPROFILE%\.ssh\config`
-- выведет публичный ключ в консоль (для добавления в Deploy Keys)
+Если всё уже настроено, он сразу запускает сервис.
+Если нет — автоматически запускает bootstrap.
 
 ### Как добавить ключ в GitHub
 1. Скопируй вывод публичного ключа из консоли (строка начинается с `ssh-ed25519`).
@@ -85,17 +69,41 @@ git clone git@github.com:USER/REPO.git C:\deploy\rust-plugins-config
 
 ```json
 {
-  "RepoPath": "C:\\deploy\\rust-plugins-config",
-  "ServerRoot": "C:\\Users\\Administrator\\Desktop\\266Server",
-  "PluginsTarget": "C:\\Users\\Administrator\\Desktop\\266Server\\oxide\\plugins",
-  "ConfigTarget": "C:\\Users\\Administrator\\Desktop\\266Server\\oxide\\config",
   "LogPath": "C:\\deploy\\logs\\deploy.log",
   "IntervalSeconds": 120,
   "Branch": "main",
   "GitRetryCount": 3,
-  "GitRetryDelaySeconds": 10
+  "GitRetryDelaySeconds": 10,
+  "GitTimeoutSeconds": 30,
+  "StartupDelaySeconds": 1,
+  "DryRun": false,
+  "Servers": [
+    {
+      "Name": "main",
+      "RepoPath": "C:\\deploy\\rust-plugins-config",
+      "ServerRoot": "C:\\Users\\Administrator\\Desktop\\266Server",
+      "PluginsTarget": "C:\\Users\\Administrator\\Desktop\\266Server\\oxide\\plugins",
+      "ConfigTarget": "C:\\Users\\Administrator\\Desktop\\266Server\\oxide\\config",
+      "Branch": "main",
+      "PluginsPattern": ["*.cs"],
+      "ConfigPattern": ["*.json"],
+      "ExcludePatterns": [],
+      "DeleteExtraneous": false,
+      "Enabled": true
+    }
+  ]
 }
 ```
+
+Чтобы добавить ещё сервер, просто добавь новый объект в массив `Servers`.
+
+### Новые опции
+- `Branch` — можно задавать отдельно для каждого сервера, по умолчанию берётся глобальная `Branch`.
+- `PluginsPattern` / `ConfigPattern` — include‑паттерны (список или строка, поддерживает `**`).
+- `ExcludePatterns` — паттерны для исключения файлов.
+- `DeleteExtraneous` — если `true`, удалит файлы в целевых папках, которых нет в репозитории.
+- `Enabled` — быстро отключить сервер без удаления из конфигурации.
+- `DryRun` (глобальный флаг) — если `true`, ничего не копируется и не удаляется, только логируются действия. CLI-флаг `--dry-run` имеет приоритет.
 
 ## Установка
 Из корня репозитория:
@@ -105,14 +113,9 @@ poetry install
 ```
 
 ## Запуск
-Запуск через BAT-скрипт:
+Запуск через единый скрипт:
 ```bat
-scripts\run-service.bat
-```
-
-Или вручную:
-```bash
-poetry run rust-sync --config C:\deploy\rust-sync.json
+Start.bat
 ```
 
 ## Логи
@@ -121,3 +124,8 @@ poetry run rust-sync --config C:\deploy\rust-sync.json
 - No changes
 - Deployed commit <hash>
 - ERROR code=<code>
+
+## Поведение синхронизации
+- Проверяет хэши файлов даже если коммит не изменился — локальные ручные правки будут перезаписаны из репозитория.
+- При `DeleteExtraneous=true` удаляет лишние файлы в `PluginsTarget` и `ConfigTarget`, которые не присутствуют в репозитории (с учётом include/exclude паттернов).
+- `DryRun` выводит детальный список: create/update/delete для каждого файла, без фактических изменений.

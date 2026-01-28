@@ -1,4 +1,6 @@
 import argparse
+import fnmatch
+import hashlib
 import json
 import logging
 import shutil
@@ -13,38 +15,70 @@ EXIT_ENV = 1
 EXIT_GIT = 2
 EXIT_JSON = 3
 EXIT_COPY = 4
+EXIT_CONFIG = 5
+GIT_TIMEOUT_SECONDS = 30
+STARTUP_DELAY_SECONDS = 1
 
 DEFAULT_CONFIG_PATH = r"C:\deploy\rust-sync.json"
 DEFAULT_SAMPLE_CONFIG = {
-    "RepoPath": r"C:\deploy\rust-plugins-config",
-    "ServerRoot": r"C:\Users\Administrator\Desktop\266Server",
-    "PluginsTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\plugins",
-    "ConfigTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\config",
     "LogPath": r"C:\deploy\logs\deploy.log",
     "IntervalSeconds": 120,
     "Branch": "main",
     "GitRetryCount": 3,
     "GitRetryDelaySeconds": 10,
+    "GitTimeoutSeconds": GIT_TIMEOUT_SECONDS,
+    "StartupDelaySeconds": STARTUP_DELAY_SECONDS,
+    "DryRun": False,
+    "Servers": [
+        {
+            "Name": "main",
+            "RepoPath": r"C:\deploy\rust-plugins-config",
+            "ServerRoot": r"C:\Users\Administrator\Desktop\266Server",
+            "PluginsTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\plugins",
+            "ConfigTarget": r"C:\Users\Administrator\Desktop\266Server\oxide\config",
+            "Branch": "main",
+            "PluginsPattern": ["*.cs"],
+            "ConfigPattern": ["*.json"],
+            "ExcludePatterns": [],
+            "DeleteExtraneous": False,
+            "Enabled": True,
+        }
+    ],
 }
 
 
 @dataclass
-class Settings:
+class ServerConfig:
+    name: str
     repo_path: Path
     server_root: Path
     plugins_target: Path
     config_target: Path
+    branch: str | None
+    plugins_pattern: list[str]
+    config_pattern: list[str]
+    exclude_patterns: list[str]
+    delete_extraneous: bool
+    enabled: bool
+
+
+@dataclass
+class Settings:
     log_path: Path
     interval_seconds: int
     branch: str
     git_retry_count: int
     git_retry_delay_seconds: int
+    git_timeout_seconds: int
+    startup_delay_seconds: int
+    dry_run: bool
+    servers: list[ServerConfig]
 
 
 def _load_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -55,60 +89,164 @@ def _write_sample_config(path: Path) -> None:
 
 
 def _settings_from_config(cfg: dict[str, Any]) -> Settings:
+    def _require_positive(value: int, name: str) -> int:
+        if value <= 0:
+            raise ValueError(f"{name} must be > 0 (got {value})")
+        return value
+
+    def _parse_patterns(value: Any, default: list[str]) -> list[str]:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            raise ValueError(f"Patterns must be list or string (got {value})")
+        if not value and default:
+            raise ValueError("Patterns list cannot be empty")
+        patterns = [str(v).strip() for v in value if str(v).strip()]
+        if not patterns and value:
+            raise ValueError("Patterns list cannot be empty")
+        return patterns
+
+    def _parse_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        raise ValueError(f"Bool expected (got {value})")
+
     def _req(key: str) -> Any:
         if key not in cfg:
             raise KeyError(f"Missing config key: {key}")
         return cfg[key]
 
-    repo_path = Path(_req("RepoPath"))
-    server_root = Path(_req("ServerRoot"))
-    plugins_target = Path(_req("PluginsTarget"))
-    config_target = Path(_req("ConfigTarget"))
     log_path = Path(_req("LogPath"))
-
-    interval_seconds = int(cfg.get("IntervalSeconds", 120))
+    interval_seconds = _require_positive(
+        int(cfg.get("IntervalSeconds", 120)), "IntervalSeconds"
+    )
     branch = str(cfg.get("Branch", "main"))
-    git_retry_count = int(cfg.get("GitRetryCount", 3))
+    git_retry_count = _require_positive(
+        int(cfg.get("GitRetryCount", 3)), "GitRetryCount"
+    )
     git_retry_delay_seconds = int(cfg.get("GitRetryDelaySeconds", 10))
+    git_timeout_seconds = _require_positive(
+        int(cfg.get("GitTimeoutSeconds", GIT_TIMEOUT_SECONDS)), "GitTimeoutSeconds"
+    )
+    startup_delay_seconds = _require_positive(
+        int(cfg.get("StartupDelaySeconds", STARTUP_DELAY_SECONDS)),
+        "StartupDelaySeconds",
+    )
+    dry_run = _parse_bool(cfg.get("DryRun"), False)
+
+    servers_cfg = _req("Servers")
+    if not isinstance(servers_cfg, list) or not servers_cfg:
+        raise ValueError("Servers must be a non-empty list")
+
+    servers: list[ServerConfig] = []
+    for item in servers_cfg:
+        name = str(item.get("Name", "")).strip()
+        if not name:
+            raise KeyError("Server Name is required")
+        repo_path = Path(item["RepoPath"])
+        server_root = Path(item["ServerRoot"])
+        plugins_target = Path(
+            item.get("PluginsTarget", str(server_root / "oxide" / "plugins"))
+        )
+        config_target = Path(
+            item.get("ConfigTarget", str(server_root / "oxide" / "config"))
+        )
+        branch_override = item.get("Branch")
+        plugins_pattern = _parse_patterns(item.get("PluginsPattern"), ["*.cs"])
+        config_pattern = _parse_patterns(item.get("ConfigPattern"), ["*.json"])
+        exclude_patterns = _parse_patterns(item.get("ExcludePatterns", []), [])
+        delete_extraneous = _parse_bool(item.get("DeleteExtraneous"), False)
+        enabled = _parse_bool(item.get("Enabled"), True)
+
+        servers.append(
+            ServerConfig(
+                name=name,
+                repo_path=repo_path,
+                server_root=server_root,
+                plugins_target=plugins_target,
+                config_target=config_target,
+                branch=branch_override,
+                plugins_pattern=plugins_pattern,
+                config_pattern=config_pattern,
+                exclude_patterns=exclude_patterns,
+                delete_extraneous=delete_extraneous,
+                enabled=enabled,
+            )
+        )
 
     return Settings(
-        repo_path=repo_path,
-        server_root=server_root,
-        plugins_target=plugins_target,
-        config_target=config_target,
         log_path=log_path,
         interval_seconds=interval_seconds,
         branch=branch,
         git_retry_count=git_retry_count,
         git_retry_delay_seconds=git_retry_delay_seconds,
+        git_timeout_seconds=git_timeout_seconds,
+        startup_delay_seconds=startup_delay_seconds,
+        servers=servers,
+        dry_run=dry_run,
     )
 
 
-def _ensure_paths(settings: Settings) -> bool:
+def _ensure_paths(server: ServerConfig) -> bool:
     return (
-        settings.repo_path.exists()
-        and settings.plugins_target.exists()
-        and settings.config_target.exists()
+        server.repo_path.exists()
+        and (server.repo_path / ".git").exists()
+        and server.plugins_target.exists()
+        and server.config_target.exists()
     )
 
 
-def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
+def _hash_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
-def _git_fetch_with_retries(settings: Settings) -> bool:
+def _collect_files(
+    base: Path, includes: list[str], excludes: list[str]
+) -> dict[str, Path]:
+    files: dict[str, Path] = {}
+    for pattern in includes:
+        for file in base.rglob(pattern):
+            if not file.is_file():
+                continue
+            rel = file.relative_to(base).as_posix()
+            if any(fnmatch.fnmatch(rel, ex) for ex in excludes):
+                continue
+            files[rel] = file
+    return files
+
+
+def _run_git(args: list[str], cwd: Path, timeout_seconds: int) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout_seconds}s"
+
+
+def _git_fetch_with_retries(settings: Settings, server: ServerConfig) -> bool:
     for attempt in range(1, settings.git_retry_count + 1):
-        code, _, err = _run_git(["fetch"], settings.repo_path)
+        code, _, err = _run_git(
+            ["fetch"], server.repo_path, settings.git_timeout_seconds
+        )
         if code == 0:
             return True
         logging.error(
-            "ERROR code=%s git fetch failed (attempt %s/%s): %s",
+            "[%s] ERROR code=%s git fetch failed (attempt %s/%s): %s",
+            server.name,
             EXIT_GIT,
             attempt,
             settings.git_retry_count,
@@ -118,44 +256,156 @@ def _git_fetch_with_retries(settings: Settings) -> bool:
     return False
 
 
-def _git_rev_parse(settings: Settings, ref: str) -> str | None:
-    code, out, err = _run_git(["rev-parse", ref], settings.repo_path)
+def _git_rev_parse(settings: Settings, server: ServerConfig, ref: str) -> str | None:
+    code, out, err = _run_git(
+        ["rev-parse", ref], server.repo_path, settings.git_timeout_seconds
+    )
     if code != 0:
-        logging.error("ERROR code=%s git rev-parse %s failed: %s", EXIT_GIT, ref, err)
+        logging.error(
+            "[%s] ERROR code=%s git rev-parse %s failed: %s",
+            server.name,
+            EXIT_GIT,
+            ref,
+            err,
+        )
         return None
     return out
 
 
-def _git_reset_hard(settings: Settings, ref: str) -> bool:
-    code, _, err = _run_git(["reset", "--hard", ref], settings.repo_path)
+def _git_reset_hard(settings: Settings, server: ServerConfig, ref: str) -> bool:
+    code, _, err = _run_git(
+        ["reset", "--hard", ref], server.repo_path, settings.git_timeout_seconds
+    )
     if code != 0:
         logging.error(
-            "ERROR code=%s git reset --hard %s failed: %s", EXIT_GIT, ref, err
+            "[%s] ERROR code=%s git reset --hard %s failed: %s",
+            server.name,
+            EXIT_GIT,
+            ref,
+            err,
         )
         return False
     return True
 
 
-def _validate_json_files(path: Path) -> bool:
-    for file in path.glob("*.json"):
+def _validate_json_from_ref(settings: Settings, server: ServerConfig, ref: str) -> bool:
+    code, out, err = _run_git(
+        ["ls-tree", "-r", "--name-only", ref, "config"],
+        server.repo_path,
+        settings.git_timeout_seconds,
+    )
+    if code != 0:
+        logging.error(
+            "[%s] ERROR code=%s git ls-tree %s failed: %s",
+            server.name,
+            EXIT_GIT,
+            ref,
+            err,
+        )
+        return False
+    files = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        rel = line.strip()
+        if any(fnmatch.fnmatch(rel, ex) for ex in server.exclude_patterns):
+            continue
+        if any(fnmatch.fnmatch(rel, pat) for pat in server.config_pattern):
+            files.append(rel)
+    for file in files:
+        code, content, err = _run_git(
+            ["show", f"{ref}:{file}"],
+            server.repo_path,
+            settings.git_timeout_seconds,
+        )
+        if code != 0:
+            logging.error(
+                "[%s] ERROR code=%s git show %s failed: %s",
+                server.name,
+                EXIT_GIT,
+                file,
+                err,
+            )
+            return False
         try:
-            with file.open("r", encoding="utf-8") as f:
-                json.load(f)
+            json.loads(content)
         except Exception as exc:
-            logging.error("ERROR code=%s invalid JSON: %s (%s)", EXIT_JSON, file, exc)
+            logging.error(
+                "[%s] ERROR code=%s invalid JSON in %s (%s)",
+                server.name,
+                EXIT_JSON,
+                file,
+                exc,
+            )
             return False
     return True
 
 
-def _copy_files(src_dir: Path, pattern: str, dest_dir: Path) -> bool:
+def _sync_tree(
+    server: ServerConfig,
+    src_dir: Path,
+    dest_dir: Path,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+    delete_extraneous: bool,
+    dry_run: bool,
+) -> bool:
     try:
-        for file in src_dir.glob(pattern):
-            if file.is_file():
-                shutil.copy2(file, dest_dir / file.name)
+        src_files = _collect_files(src_dir, include_patterns, exclude_patterns)
+        dest_files = _collect_files(dest_dir, include_patterns, exclude_patterns)
+
+        for rel, src_file in src_files.items():
+            dest_path = dest_dir / rel
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            if dest_path.exists():
+                src_hash = _hash_file(src_file)
+                dest_hash = _hash_file(dest_path)
+                if src_hash == dest_hash:
+                    continue
+                action = f"update {rel}"
+            else:
+                src_hash = _hash_file(src_file)
+                dest_hash = None
+                action = f"create {rel}"
+
+            if dry_run:
+                logging.info(
+                    "[%s][DRY-RUN] Would %s (src=%s dest=%s)",
+                    server.name,
+                    action,
+                    src_file,
+                    dest_path if dest_hash is not None else "new",
+                )
+                continue
+
+            shutil.copy2(src_file, dest_path)
+            logging.info("[%s] %s", server.name, action)
+
+        if delete_extraneous:
+            extras = set(dest_files.keys()) - set(src_files.keys())
+            for rel in extras:
+                path = dest_dir / rel
+                if dry_run:
+                    logging.info("[%s][DRY-RUN] Would delete %s", server.name, path)
+                    continue
+                try:
+                    path.unlink()
+                    logging.info("[%s] Deleted extraneous %s", server.name, path)
+                except Exception as exc:
+                    logging.error(
+                        "[%s] ERROR code=%s failed to delete %s: %s",
+                        server.name,
+                        EXIT_COPY,
+                        path,
+                        exc,
+                    )
+                    return False
+
         return True
     except Exception as exc:
         logging.error(
-            "ERROR code=%s copy failed from %s to %s: %s",
+            "[%s] ERROR code=%s sync failed from %s to %s: %s",
+            server.name,
             EXIT_COPY,
             src_dir,
             dest_dir,
@@ -166,58 +416,88 @@ def _copy_files(src_dir: Path, pattern: str, dest_dir: Path) -> bool:
 
 def _setup_logging(log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    handlers: list[logging.Handler] = [logging.FileHandler(log_path, encoding="utf-8")]
+    handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        handlers=handlers,
+        force=True,
     )
 
 
 def run(settings: Settings) -> None:
     logging.info("START")
+    time.sleep(settings.startup_delay_seconds)
     while True:
-        if not _ensure_paths(settings):
-            logging.error("ERROR code=%s missing paths", EXIT_ENV)
-            time.sleep(settings.interval_seconds)
-            continue
+        for server in settings.servers:
+            if not server.enabled:
+                logging.info("[%s] Skipped (disabled)", server.name)
+                continue
+            if not _ensure_paths(server):
+                missing = []
+                if not server.repo_path.exists():
+                    missing.append(f"RepoPath={server.repo_path}")
+                if not (server.repo_path / ".git").exists():
+                    missing.append(f"RepoPath missing .git={server.repo_path}")
+                if not server.plugins_target.exists():
+                    missing.append(f"PluginsTarget={server.plugins_target}")
+                if not server.config_target.exists():
+                    missing.append(f"ConfigTarget={server.config_target}")
+                logging.error(
+                    "[%s] ERROR code=%s missing paths: %s",
+                    server.name,
+                    EXIT_ENV,
+                    "; ".join(missing),
+                )
+                continue
 
-        if not _git_fetch_with_retries(settings):
-            time.sleep(settings.interval_seconds)
-            continue
+            branch = server.branch or settings.branch
 
-        local = _git_rev_parse(settings, "HEAD")
-        remote = _git_rev_parse(settings, f"origin/{settings.branch}")
-        if not local or not remote:
-            time.sleep(settings.interval_seconds)
-            continue
+            if not _git_fetch_with_retries(settings, server):
+                continue
 
-        if local == remote:
-            logging.info("No changes")
-            time.sleep(settings.interval_seconds)
-            continue
+            local = _git_rev_parse(settings, server, "HEAD")
+            remote = _git_rev_parse(settings, server, f"origin/{branch}")
+            if not local or not remote:
+                continue
 
-        previous = local
-        if not _git_reset_hard(settings, remote):
-            time.sleep(settings.interval_seconds)
-            continue
+            deploy_needed = local != remote
+            if not deploy_needed:
+                logging.info("[%s] No commit diff, verifying hashes", server.name)
 
-        if not _validate_json_files(settings.repo_path / "config"):
-            _git_reset_hard(settings, previous)
-            time.sleep(settings.interval_seconds)
-            continue
+            if not _validate_json_from_ref(settings, server, f"origin/{branch}"):
+                continue
 
-        if not _copy_files(
-            settings.repo_path / "plugins", "*.cs", settings.plugins_target
-        ):
-            time.sleep(settings.interval_seconds)
-            continue
-        if not _copy_files(
-            settings.repo_path / "config", "*.json", settings.config_target
-        ):
-            time.sleep(settings.interval_seconds)
-            continue
+            if not _git_reset_hard(settings, server, remote):
+                continue
 
-        logging.info("Deployed commit %s", remote)
+            synced_plugins = _sync_tree(
+                server,
+                server.repo_path / "plugins",
+                server.plugins_target,
+                server.plugins_pattern,
+                server.exclude_patterns,
+                server.delete_extraneous,
+                settings.dry_run,
+            )
+            if not synced_plugins:
+                continue
+
+            synced_config = _sync_tree(
+                server,
+                server.repo_path / "config",
+                server.config_target,
+                server.config_pattern,
+                server.exclude_patterns,
+                server.delete_extraneous,
+                settings.dry_run,
+            )
+            if not synced_config:
+                continue
+
+            logging.info("[%s] Deployed commit %s", server.name, remote)
+
         time.sleep(settings.interval_seconds)
 
 
@@ -225,6 +505,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Rust plugins/config sync service")
     parser.add_argument(
         "--config", default=DEFAULT_CONFIG_PATH, help="Path to config JSON"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not modify files, only log planned actions",
     )
     args = parser.parse_args()
 
@@ -237,8 +522,21 @@ def main() -> None:
         print(f"ERROR code={EXIT_ENV} config created at: {args.config}")
         print("Please edit the config and restart the service.")
         sys.exit(EXIT_ENV)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR code={EXIT_CONFIG} config JSON invalid: {exc}")
+        sys.exit(EXIT_CONFIG)
+    except (KeyError, ValueError) as exc:
+        print(f"ERROR code={EXIT_CONFIG} config validation failed: {exc}")
+        sys.exit(EXIT_CONFIG)
     except Exception as exc:
-        print(f"ERROR code={EXIT_ENV} config load failed: {exc}")
+        print(f"ERROR code={EXIT_CONFIG} config load failed: {exc}")
+        sys.exit(EXIT_CONFIG)
+
+    if args.dry_run:
+        settings.dry_run = True
+
+    if shutil.which("git") is None:
+        print(f"ERROR code={EXIT_ENV} git not found in PATH")
         sys.exit(EXIT_ENV)
 
     _setup_logging(settings.log_path)
