@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -13,8 +14,10 @@ from fastapi.staticfiles import StaticFiles
 from rust_sync.service import (
     Settings,
     SyncController,
-    SyncState,
     _load_config,
+    _settings_from_config,
+    _setup_logging,
+    create_runtime,
     validate_config_dict,
 )
 
@@ -48,9 +51,62 @@ def _match_log_line(line: str, level: str | None, server: str | None) -> bool:
     return True
 
 
-def create_app(
-    settings: Settings, state: SyncState, controller: SyncController, config_path: Path
-) -> FastAPI:
+class WebRuntime:
+    def __init__(self, settings: Settings, config_path: Path) -> None:
+        self._lock = threading.Lock()
+        self.config_path = config_path
+        self.settings = settings
+        self.state, self.controller, self.runner = create_runtime(settings)
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._start_thread(self.runner, self.settings)
+
+    def _start_thread(self, runner: Any, settings: Settings) -> None:
+        def _target() -> None:
+            logging.info("START")
+            time.sleep(settings.startup_delay_seconds)
+            runner.run_forever()
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        self.thread = thread
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return self.state.snapshot()
+
+    def get_controller(self) -> SyncController:
+        with self._lock:
+            return self.controller
+
+    def get_settings(self) -> Settings:
+        with self._lock:
+            return self.settings
+
+    def restart(self, new_settings: Settings) -> None:
+        with self._lock:
+            prev_controller = self.controller
+            prev_runner = self.runner
+            prev_thread = self.thread
+            paused = prev_controller.is_paused()
+            dry_run = prev_controller.get_dry_run()
+            prev_runner.stop()
+
+        if prev_thread:
+            prev_thread.join(timeout=5)
+
+        with self._lock:
+            _setup_logging(new_settings.log_path)
+            self.settings = new_settings
+            self.state, self.controller, self.runner = create_runtime(new_settings)
+            if paused:
+                self.controller.pause()
+            self.controller.set_dry_run(dry_run)
+            self._start_thread(self.runner, self.settings)
+
+
+def create_app(runtime: WebRuntime) -> FastAPI:
     app = FastAPI()
     static_dir = Path(__file__).parent / "web" / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -62,23 +118,24 @@ def create_app(
 
     @app.get("/api/status")
     def status() -> JSONResponse:
-        snapshot = state.snapshot()
+        snapshot = runtime.snapshot()
+        controller = runtime.get_controller()
         payload = {
             "paused": controller.is_paused(),
             "dry_run": controller.get_dry_run(),
-            "config_path": str(config_path),
+            "config_path": str(runtime.config_path),
             "servers": snapshot["servers"],
         }
         return JSONResponse(payload)
 
     @app.get("/api/history")
     def history() -> JSONResponse:
-        snapshot = state.snapshot()
+        snapshot = runtime.snapshot()
         return JSONResponse({"items": snapshot["history"]})
 
     @app.get("/api/config")
     def config() -> JSONResponse:
-        cfg = _load_config(config_path)
+        cfg = _load_config(runtime.config_path)
         return JSONResponse(cfg)
 
     @app.post("/api/validate")
@@ -94,7 +151,7 @@ def create_app(
     def open_config() -> JSONResponse:
         if os.name == "nt":
             try:
-                os.startfile(str(config_path))  # type: ignore[attr-defined]
+                os.startfile(str(runtime.config_path))  # type: ignore[attr-defined]
                 return JSONResponse({"ok": True})
             except Exception as exc:
                 return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
@@ -102,24 +159,24 @@ def create_app(
 
     @app.post("/api/pause")
     def pause() -> JSONResponse:
-        controller.pause()
+        runtime.get_controller().pause()
         return JSONResponse({"ok": True})
 
     @app.post("/api/resume")
     def resume() -> JSONResponse:
-        controller.resume()
+        runtime.get_controller().resume()
         return JSONResponse({"ok": True})
 
     @app.post("/api/run-once")
     def run_once() -> JSONResponse:
-        controller.request_run_once()
+        runtime.get_controller().request_run_once()
         return JSONResponse({"ok": True})
 
     @app.post("/api/dry-run")
     async def dry_run(request: Request) -> JSONResponse:
         body = await request.json()
         enabled = bool(body.get("enabled", False))
-        controller.set_dry_run(enabled)
+        runtime.get_controller().set_dry_run(enabled)
         return JSONResponse({"ok": True, "dry_run": enabled})
 
     @app.get("/api/logs/stream")
@@ -127,14 +184,14 @@ def create_app(
         level: str | None = None, server: str | None = None, tail: int = 200
     ) -> StreamingResponse:
         async def event_stream() -> AsyncIterator[str]:
-            for line in _tail_lines(settings.log_path, tail):
+            log_path = runtime.get_settings().log_path
+            for line in _tail_lines(log_path, tail):
                 if _match_log_line(line, level, server):
                     yield f"data: {line}\n\n"
 
             try:
-                with settings.log_path.open(
-                    "r", encoding="utf-8", errors="replace"
-                ) as f:
+                log_path = runtime.get_settings().log_path
+                with log_path.open("r", encoding="utf-8", errors="replace") as f:
                     f.seek(0, os.SEEK_END)
                     while True:
                         line = f.readline()
@@ -149,32 +206,31 @@ def create_app(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    @app.post("/api/config/save")
+    async def save_config(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            return JSONResponse({"ok": False, "errors": [str(exc)]}, status_code=400)
+
+        errors = validate_config_dict(body)
+        if errors:
+            return JSONResponse({"ok": False, "errors": errors}, status_code=400)
+
+        runtime.config_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime.config_path.write_text(
+            json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        new_settings = _settings_from_config(body)
+        runtime.restart(new_settings)
+        return JSONResponse({"ok": True})
+
     return app
 
 
-def run_web(
-    settings: Settings,
-    state: SyncState,
-    controller: SyncController,
-    config_path: Path,
-    host: str,
-    port: int,
-) -> None:
+def run_web(runtime: WebRuntime, host: str, port: int) -> None:
     import uvicorn
 
-    app = create_app(settings, state, controller, config_path)
+    app = create_app(runtime)
     uvicorn.run(app, host=host, port=port, log_level="info")
-
-
-def start_runner_background(
-    runner: Any, startup_delay_seconds: int
-) -> threading.Thread:
-    def _target() -> None:
-        runner.settings.startup_delay_seconds = max(0, startup_delay_seconds)
-        logging.info("START")
-        time.sleep(runner.settings.startup_delay_seconds)
-        runner.run_forever()
-
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    return thread

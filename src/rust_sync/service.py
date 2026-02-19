@@ -761,7 +761,13 @@ def create_runtime(
 ) -> tuple[SyncState, SyncController, "SyncRunner"]:
     state = SyncState([srv.name for srv in settings.servers])
     controller = SyncController()
-    runner = SyncRunner(settings=settings, state=state, controller=controller)
+    stop_event = threading.Event()
+    runner = SyncRunner(
+        settings=settings,
+        state=state,
+        controller=controller,
+        stop_event=stop_event,
+    )
     return state, controller, runner
 
 
@@ -882,28 +888,42 @@ def _run_cycle(
 
 class SyncRunner:
     def __init__(
-        self, settings: Settings, state: SyncState, controller: SyncController
+        self,
+        settings: Settings,
+        state: SyncState,
+        controller: SyncController,
+        stop_event: threading.Event,
     ):
         self.settings = settings
         self.state = state
         self.controller = controller
+        self._stop_event = stop_event
 
     def run_forever(self) -> None:
-        while True:
+        while not self._stop_event.is_set():
             if self.controller.consume_run_once():
                 _run_cycle(self.settings, self.state, self.controller)
                 if self.controller.is_paused():
-                    time.sleep(1)
+                    self._sleep_with_stop(1)
                 else:
-                    time.sleep(self.settings.interval_seconds)
+                    self._sleep_with_stop(self.settings.interval_seconds)
                 continue
 
             if self.controller.is_paused():
-                time.sleep(1)
+                self._sleep_with_stop(1)
                 continue
 
             _run_cycle(self.settings, self.state, self.controller)
-            time.sleep(self.settings.interval_seconds)
+            self._sleep_with_stop(self.settings.interval_seconds)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _sleep_with_stop(self, seconds: int) -> None:
+        remaining = max(0, int(seconds * 2))
+        while remaining > 0 and not self._stop_event.is_set():
+            time.sleep(0.5)
+            remaining -= 1
 
 
 def main() -> None:
@@ -995,15 +1015,12 @@ def main() -> None:
 
     _setup_logging(settings.log_path)
     if args.web:
-        from rust_sync.webapp import run_web, start_runner_background
+        from rust_sync.webapp import WebRuntime, run_web
 
-        state, controller, runner = create_runtime(settings)
-        start_runner_background(runner, settings.startup_delay_seconds)
+        runtime = WebRuntime(settings=settings, config_path=config_path)
+        runtime.start()
         run_web(
-            settings=settings,
-            state=state,
-            controller=controller,
-            config_path=config_path,
+            runtime=runtime,
             host=args.web_host,
             port=args.web_port,
         )

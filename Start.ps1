@@ -1,7 +1,7 @@
 param(
     [string]$ConfigPath = "C:\deploy\rust-sync.json",
     [switch]$Bootstrap,
-    [switch]$Web,
+    [switch]$Web = $true,
     [string]$WebHost = "0.0.0.0",
     [int]$WebPort = 8787
 )

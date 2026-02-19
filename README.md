@@ -100,9 +100,9 @@ python -m pip install -e .
 Start.bat
 ```
 
-Запуск с веб-интерфейсом:
+Веб-интерфейс запускается по умолчанию. Чтобы отключить:
 ```powershell
-.\Start.ps1 -Web
+.\Start.ps1 -Web:$false
 ```
 
 URL по умолчанию: `http://<server-ip>:8787`

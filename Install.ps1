@@ -66,7 +66,7 @@ if ($InstallPoetry) {
 
 if ($InstallDeps) {
     Log "Installing project dependencies..."
-    Invoke-Python -m pip install -e .
+    Invoke-Python -m pip install --editable .
 }
 
 Log "Done."

@@ -8,59 +8,88 @@
   </head>
   <body>
     <div class="bg"></div>
-    <header class="top">
-      <div>
-        <div class="eyebrow">Rust Plugin Sync</div>
-        <h1>Панель управления</h1>
-        <div class="sub">статусы, логи, управление синхронизацией</div>
-      </div>
-      <div class="status-pill" id="globalStatus">UNKNOWN</div>
-    </header>
-
-    <section class="grid">
-      <div class="card">
-        <div class="card-title">Состояние</div>
-        <div id="statusCards" class="status-cards"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">Управление</div>
-        <div class="actions">
-          <button id="btnPause">Pause</button>
-          <button id="btnResume">Resume</button>
-          <button id="btnRunOnce">Run once</button>
+    <div class="app">
+      <header class="topbar">
+        <div class="title">
+          <div class="eyebrow">Rust Plugin Sync</div>
+          <h1>Панель управления</h1>
+        </div>
+        <div class="tabs">
+          <button class="tab active" data-tab="dashboard">Dashboard</button>
+          <button class="tab" data-tab="logs">Logs</button>
+          <button class="tab" data-tab="history">History</button>
+          <button class="tab" data-tab="config">Config</button>
+        </div>
+        <div class="status-area">
+          <span id="syncDot" class="dot"></span>
+          <span id="syncStatusText">Running</span>
+          <button id="btnToggleSync" class="secondary">Pause</button>
           <label class="toggle">
             <input id="toggleDry" type="checkbox" />
             <span>Dry-run</span>
           </label>
+          <button id="btnRunOnce" class="primary">Run once</button>
         </div>
-        <div class="config-actions">
-          <button id="btnOpenConfig" class="secondary">Open config</button>
-          <button id="btnValidate" class="secondary">Validate config</button>
-          <span id="validateStatus" class="hint"></span>
-        </div>
-        <textarea id="configText" readonly></textarea>
-      </div>
-      <div class="card span-2">
-        <div class="card-title">Логи</div>
-        <div class="filters">
-          <select id="levelFilter">
-            <option value="">ALL</option>
-            <option value="INFO">INFO</option>
-            <option value="ERROR">ERROR</option>
-            <option value="WARNING">WARNING</option>
-          </select>
-          <select id="serverFilter">
-            <option value="">ALL SERVERS</option>
-          </select>
-          <button id="btnClear" class="secondary">Clear</button>
-        </div>
-        <pre id="logStream" class="log"></pre>
-      </div>
-      <div class="card span-2">
-        <div class="card-title">История деплоев</div>
-        <div id="history" class="history"></div>
-      </div>
-    </section>
+      </header>
+
+      <main class="content">
+        <section class="tab-panel active" id="tab-dashboard">
+          <div class="grid">
+            <div class="card">
+              <div class="card-title">Состояние серверов</div>
+              <div id="statusCards" class="status-cards"></div>
+            </div>
+            <div class="card">
+              <div class="card-title">Быстрые действия</div>
+              <div class="actions">
+                <button id="btnOpenConfig" class="secondary">Open config</button>
+                <button id="btnValidate" class="secondary">Validate config</button>
+                <span id="validateStatus" class="hint"></span>
+              </div>
+              <div class="hint">Сохранение конфига перезапускает сервис.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-logs">
+          <div class="card">
+            <div class="card-title">Логи</div>
+            <div class="filters">
+              <select id="levelFilter">
+                <option value="">ALL</option>
+                <option value="INFO">INFO</option>
+                <option value="ERROR">ERROR</option>
+                <option value="WARNING">WARNING</option>
+              </select>
+              <select id="serverFilter">
+                <option value="">ALL SERVERS</option>
+              </select>
+              <button id="btnClear" class="secondary">Clear</button>
+            </div>
+            <pre id="logStream" class="log"></pre>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-history">
+          <div class="card">
+            <div class="card-title">История деплоев</div>
+            <div id="history" class="history"></div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-config">
+          <div class="card">
+            <div class="card-title">Конфигурация</div>
+            <div id="configForm"></div>
+            <div class="actions">
+              <button id="btnAddServer" class="secondary">Add server</button>
+              <button id="btnSaveConfig" class="primary">Save & Restart</button>
+              <span id="saveStatus" class="hint"></span>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
 
     <script src="/static/app.js"></script>
   </body>
